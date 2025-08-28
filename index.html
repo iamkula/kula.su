@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KULA // Generative Identity v2.2</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --background: #1a0f18;
+            --foreground: #f8e8f4;
+            --accent: #e24a9d;
+        }
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        html, body {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: var(--background);
+            font-family: 'Montserrat', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+            cursor: none;
+        }
+        canvas#constellation {
+            display: block;
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+        #overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: flex-end;
+            pointer-events: none;
+        }
+        #hint {
+            color: var(--foreground);
+            opacity: 0.2;
+            font-size: 0.8rem;
+            margin-bottom: 2rem;
+            letter-spacing: 0.1em;
+            transition: opacity 0.5s ease;
+        }
+        body:hover #hint {
+            opacity: 0.5;
+        }
+        #cursor-glow {
+            position: absolute;
+            width: 800px;
+            height: 800px;
+            border-radius: 50%;
+            background: radial-gradient(circle, rgba(226, 74, 157, 0.06) 0%, rgba(226, 74, 157, 0) 40%);
+            transform: translate(-50%, -50%);
+            pointer-events: none;
+            transition: background 0.2s ease-out;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="constellation"></canvas>
+    <div id="overlay">
+        <p id="hint">CLICK</p>
+    </div>
+    <div id="cursor-glow"></div>
+
+    <script>
+    (() => {
+        'use strict';
+
+        const canvas = document.getElementById('constellation');
+        const ctx = canvas.getContext('2d', { alpha: false });
+        const hint = document.getElementById('hint');
+        const cursorGlow = document.getElementById('cursor-glow');
+
+        let width, height, dpr;
+        let particles = [];
+        let targets = [];
+        let isAssembled = true;
+
+        const MOUSE = {
+            position: { x: -1000, y: -1000 },
+            radius: 100,
+        };
+
+        const CONFIG = {
+            particleCount: 2500,
+            fontFamily: "'Montserrat', system-ui, sans-serif",
+            text: 'KULA',
+            friction: 0.92,
+            maxSpeed: 4,
+            maxForce: 0.2,
+            mouseRepelStrength: -1.5,
+            returnStrength: 0.005,
+        };
+
+        class Vector {
+            constructor(x = 0, y = 0) { this.x = x; this.y = y; }
+            static add(v1, v2) { return new Vector(v1.x + v2.x, v1.y + v2.y); }
+            static sub(v1, v2) { return new Vector(v1.x - v2.x, v1.y - v2.y); }
+            static mult(v, s) { return new Vector(v.x * s, v.y * s); }
+            static div(v, s) { return s !== 0 ? new Vector(v.x / s, v.y / s) : new Vector(); }
+            add(v) { this.x += v.x; this.y += v.y; return this; }
+            sub(v) { this.x -= v.x; this.y -= v.y; return this; }
+            mult(s) { this.x *= s; this.y *= s; return this; }
+            div(s) { if (s !== 0) { this.x /= s; this.y /= s; } return this; }
+            magSq() { return this.x * this.x + this.y * this.y; }
+            mag() { return Math.sqrt(this.magSq()); }
+            normalize() { const len = this.mag(); if (len > 0) { this.div(len); } return this; }
+            limit(max) { if (this.magSq() > max * max) { this.normalize().mult(max); } return this; }
+            setMag(len) { return this.normalize().mult(len); }
+        }
+
+        class Particle {
+            constructor(x, y, baseHue) {
+                this.position = new Vector(Math.random() * width, Math.random() * height);
+                this.velocity = new Vector();
+                this.acceleration = new Vector();
+                this.target = new Vector(x, y);
+                this.home = new Vector(x, y);
+                this.color = `hsla(${baseHue + (Math.random() * 20 - 10)}, 90%, ${65 + Math.random() * 20}%, 0.9)`;
+            }
+            applyForce(force) { this.acceleration.add(force); }
+            seek(target) {
+                const desired = Vector.sub(target, this.position).normalize().mult(CONFIG.maxSpeed);
+                const steer = Vector.sub(desired, this.velocity).limit(CONFIG.maxForce);
+                return steer;
+            }
+            flee(target) {
+                const desired = Vector.sub(target, this.position);
+                if (desired.magSq() < (MOUSE.radius * MOUSE.radius * dpr * dpr)) {
+                    desired.setMag(CONFIG.maxSpeed).mult(-1);
+                    const steer = Vector.sub(desired, this.velocity).limit(CONFIG.maxForce * 2);
+                    return steer;
+                }
+                return new Vector();
+            }
+            wander() {
+                return new Vector(Math.random() - 0.5, Math.random() - 0.5).setMag(0.01);
+            }
+            behaviors() {
+                const repel = this.flee(MOUSE.position).mult(CONFIG.mouseRepelStrength);
+                this.applyForce(repel);
+                if (isAssembled) {
+                    this.applyForce(this.seek(this.target));
+                } else {
+                    const returnHome = this.seek(this.home).mult(CONFIG.returnStrength);
+                    this.applyForce(returnHome);
+                    this.applyForce(this.wander());
+                }
+            }
+            update() {
+                this.velocity.add(this.acceleration).mult(CONFIG.friction).limit(CONFIG.maxSpeed);
+                this.position.add(this.velocity);
+                this.acceleration.mult(0);
+                if(!isAssembled) { this.bounds(); }
+            }
+            bounds() {
+                if (this.position.x > width) this.position.x = 0;
+                if (this.position.x < 0) this.position.x = width;
+                if (this.position.y > height) this.position.y = 0;
+                if (this.position.y < 0) this.position.y = height;
+            }
+            draw(c) {
+                c.fillStyle = this.color;
+                c.fillRect(this.position.x, this.position.y, 1 * dpr, 1 * dpr);
+            }
+        }
+        
+        const sampleText = () => {
+            const offscreenCanvas = document.createElement('canvas');
+            const offscreenCtx = offscreenCanvas.getContext('2d');
+            offscreenCanvas.width = width;
+            offscreenCanvas.height = height;
+            const fontSize = Math.floor(width / 6);
+            offscreenCtx.font = `bold ${fontSize}px ${CONFIG.fontFamily}`;
+            offscreenCtx.fillStyle = '#fff';
+            offscreenCtx.textBaseline = 'middle';
+            offscreenCtx.textAlign = 'left';
+
+            const sampledPoints = [];
+            const samplingDensity = 4;
+            const text = CONFIG.text;
+            const totalWidth = offscreenCtx.measureText(text).width;
+            let currentX = (width - totalWidth) / 2;
+
+            for (let i = 0; i < text.length; i++) {
+                const letter = text[i];
+                offscreenCtx.clearRect(0, 0, width, height);
+                offscreenCtx.fillText(letter, currentX, height / 2);
+                const imageData = offscreenCtx.getImageData(0, 0, width, height);
+                const data = imageData.data;
+                for (let y = 0; y < height; y += samplingDensity) {
+                    for (let x = 0; x < width; x += samplingDensity) {
+                        const index = (y * width + x) * 4;
+                        if (data[index + 3] > 128) {
+                            sampledPoints.push({ pos: new Vector(x, y), letterIndex: i });
+                        }
+                    }
+                }
+                currentX += offscreenCtx.measureText(letter).width;
+            }
+            return sampledPoints;
+        };
+
+        const setup = () => {
+            dpr = window.devicePixelRatio || 1;
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width * dpr;
+            canvas.height = height * dpr;
+            canvas.style.width = `${width}px`;
+            canvas.style.height = `${height}px`;
+            ctx.scale(dpr, dpr);
+            
+            targets = sampleText();
+            particles = [];
+            const LETTER_HUES = [210, 270, 330, 40];
+            
+            for (let i = 0; i < CONFIG.particleCount; i++) {
+                if (targets.length === 0) break;
+                const targetData = targets[i % targets.length];
+                const baseHue = LETTER_HUES[targetData.letterIndex % LETTER_HUES.length];
+                particles.push(new Particle(targetData.pos.x, targetData.pos.y, baseHue));
+            }
+        };
+
+        const animate = () => {
+            ctx.fillStyle = 'rgba(26, 15, 24, 0.2)';
+            ctx.fillRect(0, 0, width, height);
+            particles.forEach(p => {
+                p.behaviors();
+                p.update();
+                p.draw(ctx);
+            });
+            requestAnimationFrame(animate);
+        };
+
+        const onResize = () => setup();
+        const onMouseMove = (e) => {
+            MOUSE.position.x = e.clientX;
+            MOUSE.position.y = e.clientY;
+            cursorGlow.style.left = `${e.clientX}px`;
+            cursorGlow.style.top = `${e.clientY}px`;
+        };
+        const onClick = () => {
+            isAssembled = !isAssembled;
+            hint.textContent = isAssembled ? 'DISPERSE' : 'ASSEMBLE';
+            if (isAssembled) {
+                for(let i = 0; i < particles.length; i++) {
+                    if (targets.length === 0) break;
+                    const targetData = targets[i % targets.length];
+                    particles[i].target.x = targetData.pos.x;
+                    particles[i].target.y = targetData.pos.y;
+                }
+            } else {
+                particles.forEach(p => {
+                    p.target.x = Math.random() * width;
+                    p.target.y = Math.random() * height;
+                });
+            }
+        };
+
+        window.addEventListener('resize', onResize);
+        window.addEventListener('mousemove', onMouseMove);
+        window.addEventListener('click', onClick);
+
+        setup();
+        animate();
+    })();
+    </script>
+</body>
+</html>
